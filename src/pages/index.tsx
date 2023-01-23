@@ -1,59 +1,32 @@
 import Head from 'next/head';
 import clsx from 'clsx';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Data, getAuctionData } from './api/auction';
+import { useEffect, useState } from 'react';
+import { calcRemainingTurnTime, getCurrentTurn, getActiveBidderId } from '@/utils/bidding';
 import formatCountdown from '@/utils/format-countdown';
-
-import type { GetServerSideProps, InferGetServerSidePropsType } from 'next';
+import type { InferGetServerSidePropsType } from 'next';
 
 type PageProps = InferGetServerSidePropsType<typeof getServerSideProps>;
 
-const clockWorker =
-  typeof window !== 'undefined' &&
-  new Worker(new URL('@/workers/clock-worker.ts', import.meta.url));
-
-const fetchAuctionData = async () => {
-  try {
-    const resonse = await fetch('/api/auction');
-    const data = await resonse.json();
-
-    return data as Data;
-  } catch (err) {
-    console.log(err);
-  }
-};
-
 export default function Home({ data }: PageProps) {
-  const [auctionData, setAuctionData] = useState(data);
-
-  const handleTick = useCallback(async () => {
-    if (auctionData.activeBidderTicksLeft <= 0) {
-      const newData = await fetchAuctionData();
-      newData && setAuctionData(newData);
-
-      return;
-    }
-
-    setAuctionData((data) => ({ ...data, activeBidderTicksLeft: data.activeBidderTicksLeft - 1 }));
-  }, [auctionData]);
+  const [countdownTime, setCountdownTime] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!clockWorker) return;
+    const clockWorker = new Worker(new URL('@/workers/clock-worker.ts', import.meta.url));
 
-    clockWorker.addEventListener('message', handleTick);
-
-    return () => clockWorker.removeEventListener('message', handleTick);
-  }, [handleTick]);
-
-  useEffect(() => {
-    getAuctionData().then((freshData) => {
-      console.log('current data: ', auctionData, 'fresh data: ', freshData);
-      console.log(
-        'countdown deviates by ticks count: ',
-        auctionData.activeBidderTicksLeft - freshData.activeBidderTicksLeft
-      );
+    clockWorker.addEventListener('message', () => {
+      setCountdownTime(calcRemainingTurnTime(data.biddingStartedAt, data.biddingTurnDuration));
     });
-  }, [auctionData]);
+
+    setCountdownTime(calcRemainingTurnTime(data.biddingStartedAt, data.biddingTurnDuration));
+
+    return () => clockWorker.terminate();
+  }, [data]);
+
+  const currentTurn = getCurrentTurn(data.biddingStartedAt, data.biddingTurnDuration);
+  const activeBidderId = getActiveBidderId(currentTurn, data.bidders.length);
+  const biddingStartedDate = new Date(data.biddingStartedAt).toLocaleString('ru-RU');
+
+  if (!countdownTime) return <p>Loading...</p>;
 
   return (
     <>
@@ -63,22 +36,28 @@ export default function Home({ data }: PageProps) {
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
-      <main className="p-10 text-neutral-800">
-        <h1 className="text-4xl mb-4 font-bold capitalize">welcome to auction</h1>
+      <main className="p-10 text-neutral-900">
+        <h1 className="text-3xl mb-10 font-bold">Торги от - {biddingStartedDate}</h1>
         <ul className="flex flex-wrap gap-4">
-          {auctionData.bidders.map((bidder) => (
-            <li
-              key={bidder.name}
-              className={clsx(
-                'p-2 rounded-lg ring-2 ring-blue-300 grid grid-rows-2',
-                bidder && 'bg-gradient-to-br from-cyan-100 to-blue-300'
-              )}
-            >
-              <h3 className="font-bold text-lg">
-                {bidder.id === auctionData.activeBidderId &&
-                  formatCountdown(auctionData.activeBidderTicksLeft)}
-              </h3>
-              <h4 className="capitalize font-bold">{bidder.name}</h4>
+          {data.bidders.map((bidder) => (
+            <li key={bidder.name} className="grid grid-rows-2 gap-4">
+              <div>
+                {bidder.id === activeBidderId && (
+                  <div className="bg-red-100 w-full h-full flex gap-2 justify-center items-center rounded-md">
+                    <span className="font-bold text-red-800">{formatCountdown(countdownTime)}</span>
+                    <span>⌛</span>
+                  </div>
+                )}
+              </div>
+
+              <div
+                className={clsx(
+                  'bg-gray-100 rounded-md p-5 text-gray-400 transition-colors',
+                  bidder.id === activeBidderId && 'text-current bg-red-100'
+                )}
+              >
+                <span className="capitalize font-bold">{bidder.name}</span>
+              </div>
             </li>
           ))}
         </ul>
@@ -87,10 +66,27 @@ export default function Home({ data }: PageProps) {
   );
 }
 
-export const getServerSideProps: GetServerSideProps<{ data: Data }> = async () => {
-  const data = await getAuctionData();
+export const getServerSideProps = async () => {
+  const BIDDERS_COUNT = 4;
+  const BIDDER_TURN_DURATION_MS = 1000 * 60 * 2;
+
+  // Arbitrary date when bidding started
+  const biddingStartedDate = new Date(2023, 0, 1);
+
+  const bidders = Array(BIDDERS_COUNT)
+    .fill(null)
+    .map((_, idx) => ({
+      id: idx,
+      name: `Участник - ${idx + 1}`,
+    }));
 
   return {
-    props: { data },
+    props: {
+      data: {
+        biddingStartedAt: biddingStartedDate.getTime(),
+        biddingTurnDuration: BIDDER_TURN_DURATION_MS,
+        bidders,
+      },
+    },
   };
 };
