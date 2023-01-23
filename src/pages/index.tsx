@@ -1,9 +1,60 @@
 import Head from 'next/head';
-import { Inter } from '@next/font/google';
+import clsx from 'clsx';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Data, getAuctionData } from './api/auction';
+import formatCountdown from '@/utils/format-countdown';
 
-const inter = Inter({ subsets: ['latin'] });
+import type { GetServerSideProps, InferGetServerSidePropsType } from 'next';
 
-export default function Home() {
+type PageProps = InferGetServerSidePropsType<typeof getServerSideProps>;
+
+const clockWorker =
+  typeof window !== 'undefined' &&
+  new Worker(new URL('@/workers/clock-worker.ts', import.meta.url));
+
+const fetchAuctionData = async () => {
+  try {
+    const resonse = await fetch('/api/auction');
+    const data = await resonse.json();
+
+    return data as Data;
+  } catch (err) {
+    console.log(err);
+  }
+};
+
+export default function Home({ data }: PageProps) {
+  const [auctionData, setAuctionData] = useState(data);
+
+  const handleTick = useCallback(async () => {
+    if (auctionData.activeBidderTicksLeft <= 0) {
+      const newData = await fetchAuctionData();
+      newData && setAuctionData(newData);
+
+      return;
+    }
+
+    setAuctionData((data) => ({ ...data, activeBidderTicksLeft: data.activeBidderTicksLeft - 1 }));
+  }, [auctionData]);
+
+  useEffect(() => {
+    if (!clockWorker) return;
+
+    clockWorker.addEventListener('message', handleTick);
+
+    return () => clockWorker.removeEventListener('message', handleTick);
+  }, [handleTick]);
+
+  useEffect(() => {
+    getAuctionData().then((freshData) => {
+      console.log('current data: ', auctionData, 'fresh data: ', freshData);
+      console.log(
+        'countdown deviates by ticks count: ',
+        auctionData.activeBidderTicksLeft - freshData.activeBidderTicksLeft
+      );
+    });
+  }, [auctionData]);
+
   return (
     <>
       <Head>
@@ -12,7 +63,34 @@ export default function Home() {
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
-      <main className={inter.className}>hey</main>
+      <main className="p-10 text-neutral-800">
+        <h1 className="text-4xl mb-4 font-bold capitalize">welcome to auction</h1>
+        <ul className="flex flex-wrap gap-4">
+          {auctionData.bidders.map((bidder) => (
+            <li
+              key={bidder.name}
+              className={clsx(
+                'p-2 rounded-lg ring-2 ring-blue-300 grid grid-rows-2',
+                bidder && 'bg-gradient-to-br from-cyan-100 to-blue-300'
+              )}
+            >
+              <h3 className="font-bold text-lg">
+                {bidder.id === auctionData.activeBidderId &&
+                  formatCountdown(auctionData.activeBidderTicksLeft)}
+              </h3>
+              <h4 className="capitalize font-bold">{bidder.name}</h4>
+            </li>
+          ))}
+        </ul>
+      </main>
     </>
   );
 }
+
+export const getServerSideProps: GetServerSideProps<{ data: Data }> = async () => {
+  const data = await getAuctionData();
+
+  return {
+    props: { data },
+  };
+};
